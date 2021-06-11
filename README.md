@@ -1,1 +1,1 @@
-# VUT-FIT-IOS-2020-2021
+Operačné systémy - IOS - project1
