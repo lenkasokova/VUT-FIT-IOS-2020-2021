@@ -1,0 +1,240 @@
+#!/bin/sh
+
+export POSIXLY_CORRECT=yes
+export LC_NUMERIC=en_US.UTF-8
+
+print_help()
+{
+  echo "Usage: tradelog [-h | --help]"
+  echo "       tradelog [FILTER...] [COMMAND] [LOG...]"
+  echo ""
+  echo "DESCRIPTION
+        COMMAND
+            list-tick     print list of stock exchange symbols - tickers
+            profit        print total profit
+            pos           print list of values currently holding position sorted ascending
+            last-price    print the last known price for each ticker
+            hist-ord      print histogram of the number of transactions according to tickers
+            graph-pos     print graph values holding position according to tickers
+
+        FILTER
+            -a DATETIME   after: print records AFTER this date (without this date)
+                          DATETIME is in the format YYYY-MM-DD HH:MM:SS
+
+            -b DATETIME   before: print records BEFORE this date (without this date)
+                          DATETIME is in the format YYYY-MM-DD HH:MM:SS
+
+            -t TICKER     print only records corresponding to given ticker. In more
+                          occurrences of switch is accepted set of all listed tickers
+
+            -w WIDTH      when listing graphs, their width is set, thus the length of the longest
+                          line on width. Thus, width must be positive whole integer. More
+                          occurrences of switch is wrong start-up
+
+        -h
+        --print_help      print hint list with short characteristics of each command and switch"
+
+
+}
+
+error_message()
+{
+    echo "tradelog: invalid option" >&2
+    echo "Try \`./tradelog --help' or \`./tradelog -h' for more information." >&2
+}
+
+# Process parameters
+
+while [ "$#" -gt 0 ]
+
+do
+  case "$1" in # if the parameter is command
+  list-tick | profit | pos | last-price | hist-ord | graph-pos)
+
+    if [ -n "$COMMAND" ]
+    then
+      error_message
+      exit 1
+    fi
+
+    COMMAND="$1"
+    shift;;
+
+  # tickers
+  -h | --help)
+    print_help
+    exit 0;;
+
+  -w)
+    if [ -n "$WIDTH" ] || [ "$2" -le 0 ]
+    then
+      error_message
+      exit 2
+    fi
+
+    WIDTH="$2"
+    shift
+    shift;;
+
+  -a)
+    aDATE="$2"
+    shift
+    shift;;
+
+  -b)
+    bDATE="$2"
+    shift
+    shift;;
+
+  -t)
+    TICKER="$2 $TICKER"
+    shift
+    shift;;
+
+  # files
+  *.log)
+    if [ -r "$1" ]
+    then
+      if [ -z "$LOG_FILES" ] # 1. file
+      then
+        LOG_FILES=$(cat "$1")
+      else
+        LOG_FILES=$(echo "$LOG_FILES" && cat "$1") # if there is more than 1 file
+      fi
+    else
+      error_message
+      exit 1
+    fi
+    shift;;
+
+  *.gz)
+    if [ -r "$1" ]
+    then
+      if [ -z "$LOG_FILES" ] # 1. file
+      then
+        LOG_FILES=$(gzip -d -c "$1")
+      else
+        LOG_FILES=$(echo "$LOG_FILES" && gzip -d -c "$1") # if there is more than 1 file
+      fi
+    else
+      error_message
+      exit 1
+    fi
+    shift;;
+
+  *)
+    error_message
+    exit 1
+
+  esac
+done
+
+if [ -z "$LOG_FILES" ]
+then
+  LOG_FILES=$(cat)
+fi
+
+# Filters
+
+if [ -n "$TICKER" ]
+then
+  LOG_FILES=$(for ticker in $TICKER
+  do
+    echo "$LOG_FILES" | awk -F ";" -v var="$ticker" '$2 == var { print $0 }'
+  done | sort -s -t ':' -k 1)
+fi
+
+if [ -n "$aDATE" ]
+  then
+    LOG_FILES=$(echo "$LOG_FILES" | awk -F ";" -v date="$aDATE" '$1 > date { print $0 }')
+fi
+
+if [ -n "$bDATE" ]
+  then
+    LOG_FILES=$(echo "$LOG_FILES" | awk -F ";" -v date="$bDATE" '$1 < date { print $0 }')
+fi
+
+#COMMANDS
+list_tick_f(){
+  echo "$LOG_FILES" | cut -f2 -d";" | sort | uniq
+}
+
+pos_f(){
+  for ticker in $(list_tick_f)
+  do
+    echo "$LOG_FILES" | awk -F ";" -v var="$ticker" '$2 == var {
+    if ($3 == "sell") sell_count += $6;
+    else buy_count += $6;
+    price = $4
+    }
+
+    END {
+       printf "%-10s:%.2f\n", var, (buy_count-sell_count)*price}'
+    done
+}
+
+max(){
+  echo "$LOG_FILES" | awk -F ':' '
+      function abs(n) {return n < 0 ? -n : n} {if (abs($2) > abs(max)) max=$2} END{printf "%.2f", abs(max);}'
+}
+
+align(){
+    MAX=$(echo "$LOG_FILES" | awk -F ':' '{ if(NR == 1){ max=length($2)}; if(length($2) > max) {max=length($2)}} END{printf "%.2f", max}')
+    echo "$LOG_FILES" | awk -F ':' -v max="$MAX" '{printf "%-10s: %*s\n", $1, max, $2}'
+}
+
+case "$COMMAND" in
+  list-tick)
+    LOG_FILES=$(list_tick_f);;
+
+  profit)
+    LOG_FILES=$(echo "$LOG_FILES" | awk -F ";" '{if ($3 == "sell") sell_count += $4 * $6; else buy_count += $4 * $6}
+     END {printf "%0.2f\n", sell_count - buy_count}')
+     ;;
+
+  pos)
+    LOG_FILES=$(pos_f)
+    LOG_FILES=$(align | sort -s -t ':' -k2gr);;
+
+  last-price)
+    LOG_FILES=$(for ticker in $(list_tick_f)
+    do
+      echo "$LOG_FILES" | awk -F ";" -v var="$ticker" '$2 == var { price = $4 }
+    END{ printf "%-10s:%.2f\n", var, price }'
+    done)
+    LOG_FILES=$(align | sort -s -t ':' -k1)
+  ;;
+
+  hist-ord)
+    LOG_FILES=$(for ticker in $(list_tick_f)
+    do
+      echo "$LOG_FILES" | awk -F ";" -v var="$ticker" '$2==var{ cnt_transaction++ }
+    END{ printf "%-10s:%i\n", var, cnt_transaction }'
+    done)
+
+    MAX=$(max)
+
+    LOG_FILES=$(echo "$LOG_FILES" |
+    awk -F ':' -v width="${WIDTH:-"$(max)"}" -v max="$(max)" '{res=int((width*$2)/max);
+    printf "%-10s:", $1; for (i=0; i < res; i++){ if(i == 0){printf " "} printf "#" } printf "\n"}');;
+
+  graph-pos)
+    LOG_FILES=$(pos_f | sort -s -t ':' -k2nr)
+
+    if [ -n "$WIDTH" ]
+    then
+      MAX=$(max)
+    else
+      MAX=1000
+    fi
+
+    LOG_FILES=$(echo "$LOG_FILES" |
+     awk -F ':' -v width="${WIDTH:=1}" -v max="$MAX" 'BEGIN{r=width/max}{var="#"; res=int((width*$2)/max);
+     if(res < 0) {res=-res; var="!"};
+     printf "%-10s:", $1 ; for (i=0; i < res; i++){ if(i == 0){printf " "} printf var } printf "\n"}' | sort -s -t ':' -k 1)
+    ;;
+
+esac
+
+echo "$LOG_FILES"
+exit 0
